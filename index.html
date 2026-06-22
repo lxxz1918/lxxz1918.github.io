@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>实时轮廓提取</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            height: 100dvh;
+            /* dynamic viewport height for mobile */
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            touch-action: manipulation;
+            -webkit-user-select: none;
+            user-select: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+
+        video,
+        canvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            min-width: 100%;
+            min-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: cover;
+        }
+
+        /* 后置摄像头不需要镜像，前置才需要 */
+        video.mirror,
+        canvas.mirror {
+            transform: translate(-50%, -50%) scaleX(-1);
+        }
+
+        #status {
+            position: absolute;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.65);
+            padding: 10px 20px;
+            border-radius: 25px;
+            z-index: 10;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            white-space: nowrap;
+            pointer-events: none;
+            transition: all 0.3s;
+            text-align: center;
+            max-width: 90vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #status.error {
+            background: rgba(220, 50, 50, 0.8);
+        }
+
+        #status.success {
+            background: rgba(40, 160, 60, 0.8);
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            bottom: calc(env(safe-area-inset-bottom, 20px) + 20px);
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+            flex-wrap: wrap;
+            justify-content: center;
+            padding: 0 12px;
+            max-width: 100vw;
+        }
+
+        button {
+            padding: 10px 16px;
+            border: 1.5px solid rgba(255, 255, 255, 0.3);
+            border-radius: 25px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            background: rgba(0, 0, 0, 0.55);
+            color: #fff;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            transition: all 0.2s;
+            white-space: nowrap;
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            letter-spacing: 0.3px;
+        }
+
+        button:active {
+            transform: scale(0.94);
+            background: rgba(255, 255, 255, 0.25);
+        }
+
+        button.active-highlight {
+            border-color: #4CAF50;
+            background: rgba(76, 175, 80, 0.4);
+            box-shadow: 0 0 20px rgba(76, 175, 80, 0.4);
+        }
+
+        #permission-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            text-align: center;
+            padding: 20px;
+            transition: opacity 0.5s;
+        }
+
+        #permission-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #permission-overlay .icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+
+        #permission-overlay h2 {
+            font-size: 20px;
+            margin-bottom: 12px;
+        }
+
+        #permission-overlay p {
+            font-size: 14px;
+            color: #ccc;
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+
+        #permission-overlay button {
+            background: #4CAF50;
+            border: none;
+            padding: 14px 32px;
+            font-size: 16px;
+            border-radius: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <video id="video" autoplay playsinline muted loop></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="permission-overlay">
+            <div class="icon">📷</div>
+            <h2>需要摄像头权限</h2>
+            <p>此应用需要访问您的摄像头<br>来实时检测物体轮廓</p>
+            <button id="btnStartCamera">🔓 允许并开始</button>
+        </div>
+
+        <div id="status">⏳ 等待启动...</div>
+
+        <div id="controls">
+            <button id="btnToggle">⏸️ 暂停</button>
+            <button id="btnThreshold">🔆 阈值: 中</button>
+            <button id="btnMinArea">📐 面积: 小</button>
+            <button id="btnColor">🎨 绿色</button>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            // ==================== DOM 元素 ====================
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            const statusDiv = document.getElementById('status');
+            const permissionOverlay = document.getElementById('permission-overlay');
+            const btnStartCamera = document.getElementById('btnStartCamera');
+            const btnToggle = document.getElementById('btnToggle');
+            const btnThreshold = document.getElementById('btnThreshold');
+            const btnMinArea = document.getElementById('btnMinArea');
+            const btnColor = document.getElementById('btnColor');
+
+            // ==================== 状态变量 ====================
+            let isProcessing = false;
+            let animationId = null;
+            let stream = null;
+            let videoReady = false;
+            let videoWidth = 640;
+            let videoHeight = 480;
+            let isFrontCamera = false;
+            let frameSkip = 0;
+            let frameCount = 0;
+
+            // 参数
+            const thresholdLevels = [
+                { label: '很低', value: 40 },
+                { label: '低', value: 70 },
+                { label: '中', value: 105 },
+                { label: '高', value: 145 },
+                { label: '很高', value: 190 },
+            ];
+            let thresholdIndex = 2;
+
+            const minAreaLevels = [
+                { label: '全部', value: 30 },
+                { label: '微小', value: 200 },
+                { label: '小', value: 800 },
+                { label: '中', value: 2500 },
+                { label: '大', value: 8000 },
+                { label: '巨大', value: 20000 },
+            ];
+            let minAreaIndex = 2;
+
+            const contourColors = [
+                { label: '绿色', hex: '#00FF00' },
+                { label: '红色', hex: '#FF4444' },
+                { label: '蓝色', hex: '#4488FF' },
+                { label: '黄色', hex: '#FFD700' },
+                { label: '紫色', hex: '#FF44FF' },
+                { label: '白色', hex: '#FFFFFF' },
+                { label: '青色', hex: '#00E5FF' },
+            ];
+            let colorIndex = 0;
+
+            // ==================== 工具函数 ====================
+            function setStatus(msg, type = '') {
+                statusDiv.textContent = msg;
+                statusDiv.className = type;
+            }
+
+            // ==================== 摄像头初始化 ====================
+            async function startCamera() {
+                permissionOverlay.classList.add('hidden');
+
+                // 先尝试后置摄像头
+                const constraints = {
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                    },
+                    audio: false,
+                };
+
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    await setupVideoStream(stream);
+                    // 检测是前置还是后置
+                    const track = stream.getVideoTracks()[0];
+                    if (track && track.getSettings) {
+                        const settings = track.getSettings();
+                        isFrontCamera = settings.facingMode === 'user';
+                    }
+                    updateMirroring();
+                    setStatus('✅ 实时分析中...', 'success');
+                    return;
+                } catch (err) {
+                    console.warn('后置摄像头失败，尝试前置:', err.message);
+                }
+
+                // 回退：尝试任何摄像头
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: false,
+                    });
+                    await setupVideoStream(stream);
+                    isFrontCamera = true;
+                    updateMirroring();
+                    setStatus('✅ 使用前置摄像头', 'success');
+                    return;
+                } catch (err) {
+                    console.error('所有摄像头都失败:', err);
+                }
+
+                // 最终回退：极简约束
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: { width: 640, height: 480 },
+                    });
+                    await setupVideoStream(stream);
+                    isFrontCamera = true;
+                    updateMirroring();
+                    setStatus('✅ 摄像头已连接（低分辨率）', 'success');
+                } catch (err) {
+                    console.error('摄像头完全不可用:', err);
+                    setStatus('❌ 无法访问摄像头，请检查权限设置', 'error');
+                    permissionOverlay.classList.remove('hidden');
+                }
+            }
+
+            function setupVideoStream(mediaStream) {
+                return new Promise((resolve, reject) => {
+                    video.srcObject = mediaStream;
+
+                    video.onloadedmetadata = () => {
+                        video.play().then(() => {
+                            videoWidth = video.videoWidth || 640;
+                            videoHeight = video.videoHeight || 480;
+                            canvas.width = videoWidth;
+                            canvas.height = videoHeight;
+                            videoReady = true;
+                            resolve();
+                        }).catch(reject);
+                    };
+
+                    video.onerror = (e) => {
+                        reject(new Error('视频元素错误: ' + (e.message || '未知')));
+                    };
+
+                    // 超时处理
+                    setTimeout(() => {
+                        if (!videoReady) {
+                            reject(new Error('视频加载超时'));
+                        }
+                    }, 8000);
+                });
+            }
+
+            function updateMirroring() {
+                if (isFrontCamera) {
+                    video.classList.add('mirror');
+                    canvas.classList.add('mirror');
+                } else {
+                    video.classList.remove('mirror');
+                    canvas.classList.remove('mirror');
+                }
+            }
+
+            function stopCamera() {
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                    stream = null;
+                }
+                video.srcObject = null;
+                videoReady = false;
+            }
+
+            // ==================== 图像处理 ====================
+            function processFrame() {
+                if (!videoReady || !isProcessing) return;
+
+                // 帧跳过以提升性能（处理每隔一帧）
+                frameCount++;
+                if (frameSkip > 0 && frameCount % (frameSkip + 1) !== 0) return;
+
+                try {
+                    // 清空画布并绘制视频帧
+                    ctx.clearRect(0, 0, videoWidth, videoHeight);
+                    ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+
+                    // 获取像素数据
+                    const imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+                    const { data, width, height } = imageData;
+
+                    if (!data || data.length === 0) return;
+
+                    // 转灰度
+                    const gray = new Uint8Array(width * height);
+                    for (let i = 0; i < width * height; i++) {
+                        const idx = i * 4;
+                        gray[i] = Math.round(
+                            0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]
+                        );
+                    }
+
+                    // 自适应阈值二值化（分块）
+                    const binary = new Uint8Array(width * height);
+                    const blockSize = 40;
+                    const halfBlock = Math.floor(blockSize / 2);
+                    const baseThreshold = thresholdLevels[thresholdIndex].value;
+
+                    for (let y = 0; y < height; y++) {
+                        for (let x = 0; x < width; x++) {
+                            const pixelIdx = y * width + x;
+
+                            // 快速局部均值（采样优化）
+                            const yStart = Math.max(0, y - halfBlock);
+                            const yEnd = Math.min(height - 1, y + halfBlock);
+                            const xStart = Math.max(0, x - halfBlock);
+                            const xEnd = Math.min(width - 1, x + halfBlock);
+
+                            let sum = 0;
+                            let count = 0;
+                            // 步进采样提升性能
+                            const step = Math.max(1, Math.floor((xEnd - xStart) / 10));
+                            for (let yy = yStart; yy <= yEnd; yy += step) {
+                                const rowOffset = yy * width;
+                                for (let xx = xStart; xx <= xEnd; xx += step) {
+                                    sum += gray[rowOffset + xx];
+                                    count++;
+                                }
+                            }
+                            const localMean = sum / Math.max(1, count);
+                            const offset = Math.max(5, baseThreshold - 70);
+                            binary[pixelIdx] = (gray[pixelIdx] > localMean + offset) ? 1 : 0;
+                        }
+                    }
+
+                    // 形态学闭运算（简化版，先膨胀再腐蚀）
+                    const dilated = morphDilate(binary, width, height, 1);
+                    const closed = morphErode(dilated, width, height, 1);
+
+                    // 找轮廓
+                    const contours = findContours(closed, width, height);
+
+                    // 重新绘制视频帧
+                    ctx.clearRect(0, 0, width, height);
+                    ctx.drawImage(video, 0, 0, width, height);
+
+                    // 绘制轮廓
+                    const minArea = minAreaLevels[minAreaIndex].value;
+                    const drawColor = contourColors[colorIndex].hex;
+
+                    let drawnCount = 0;
+                    for (const contour of contours) {
+                        if (contour.length < 4) continue;
+
+                        const area = calculateArea(contour);
+                        if (area < minArea) continue;
+
+                        // 绘制轮廓线
+                        ctx.beginPath();
+                        ctx.moveTo(contour[0].x, contour[0].y);
+                        for (let i = 1; i < contour.length; i++) {
+                            ctx.lineTo(contour[i].x, contour[i].y);
+                        }
+                        ctx.closePath();
+                        ctx.strokeStyle = drawColor;
+                        ctx.lineWidth = 3;
+                        ctx.shadowColor = drawColor;
+                        ctx.shadowBlur = 6;
+                        ctx.stroke();
+
+                        // 中心点
+                        const cx = contour.reduce((s, p) => s + p.x, 0) / contour.length;
+                        const cy = contour.reduce((s, p) => s + p.y, 0) / contour.length;
+                        ctx.fillStyle = drawColor;
+                        ctx.shadowBlur = 0;
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        drawnCount++;
+                    }
+
+                    ctx.shadowBlur = 0;
+
+                    // HUD 信息
+                    const hudText = `轮廓: ${drawnCount} | 阈值: ${thresholdLevels[thresholdIndex].label}`;
+                    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                    ctx.fillRect(8, 8, ctx.measureText(hudText).width + 20, 28);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '13px monospace';
+                    ctx.fillText(hudText, 18, 28);
+
+                    if (drawnCount > 0) {
+                        setStatus(`✨ 检测到 ${drawnCount} 个物体`, 'success');
+                    } else {
+                        setStatus('🔍 未检测到明显物体', '');
+                    }
+
+                } catch (err) {
+                    console.error('处理帧时出错:', err);
+                    // 恢复：直接显示视频画面
+                    ctx.clearRect(0, 0, videoWidth, videoHeight);
+                    ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+                }
+            }
+
+            // ==================== 形态学操作 ====================
+            function morphDilate(binary, w, h, r) {
+                const result = new Uint8Array(w * h);
+                for (let y = r; y < h - r; y++) {
+                    for (let x = r; x < w - r; x++) {
+                        let maxVal = 0;
+                        for (let dy = -r; dy <= r; dy++) {
+                            const row = (y + dy) * w;
+                            for (let dx = -r; dx <= r; dx++) {
+                                if (binary[row + x + dx] === 1) {
+                                    maxVal = 1;
+                                    break;
+                                }
+                            }
+                            if (maxVal === 1) break;
+                        }
+                        result[y * w + x] = maxVal;
+                    }
+                }
+                return result;
+            }
+
+            function morphErode(binary, w, h, r) {
+                const result = new Uint8Array(w * h);
+                for (let y = r; y < h - r; y++) {
+                    for (let x = r; x < w - r; x++) {
+                        let minVal = 1;
+                        for (let dy = -r; dy <= r; dy++) {
+                            const row = (y + dy) * w;
+                            for (let dx = -r; dx <= r; dx++) {
+                                if (binary[row + x + dx] === 0) {
+                                    minVal = 0;
+                                    break;
+                                }
+                            }
+                            if (minVal === 0) break;
+                        }
+                        result[y * w + x] = minVal;
+                    }
+                }
+                return result;
+            }
+
+            // ==================== 轮廓检测 ====================
+            function findContours(binary, width, height) {
+                const visited = new Uint8Array(width * height);
+                const contours = [];
+
+                const dirs = [
+                    [1, 0],
+                    [1, -1],
+                    [0, -1],
+                    [-1, -1],
+                    [-1, 0],
+                    [-1, 1],
+                    [0, 1],
+                    [1, 1]
+                ];
+
+                for (let y = 2; y < height - 2; y++) {
+                    for (let x = 2; x < width - 2; x++) {
+                        const idx = y * width + x;
+                        if (binary[idx] !== 1 || visited[idx]) continue;
+
+                        // 检查是否是边界像素
+                        const isBoundary =
+                            binary[(y - 1) * width + x] === 0 ||
+                            binary[(y + 1) * width + x] === 0 ||
+                            binary[y * width + x - 1] === 0 ||
+                            binary[y * width + x + 1] === 0;
+
+                        if (!isBoundary) continue;
+
+                        // 追踪轮廓
+                        const contour = [];
+                        let cx = x;
+                        let cy = y;
+                        let cdir = 0;
+                        let steps = 0;
+                        const maxSteps = 10000;
+
+                        do {
+                            contour.push({ x: cx, y: cy });
+                            visited[cy * width + cx] = 1;
+                            steps++;
+
+                            let found = false;
+                            // 从当前位置逆时针搜索
+                            for (let i = 0; i < 8; i++) {
+                                const sd = (cdir + i + 6) % 8;
+                                const nx = cx + dirs[sd][0];
+                                const ny = cy + dirs[sd][1];
+
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height && binary[ny * width +
+                                        nx] === 1) {
+                                    // 确认是边界
+                                    const nb =
+                                        (ny > 0 ? binary[(ny - 1) * width + nx] : 0) === 0 ||
+                                        (ny < height - 1 ? binary[(ny + 1) * width + nx] : 0) === 0 ||
+                                        (nx > 0 ? binary[ny * width + nx - 1] : 0) === 0 ||
+                                        (nx < width - 1 ? binary[ny * width + nx + 1] : 0) === 0;
+
+                                    if (nb) {
+                                        cx = nx;
+                                        cy = ny;
+                                        cdir = sd;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!found || steps > maxSteps) break;
+                        } while (!(cx === x && cy === y) && steps < maxSteps);
+
+                        if (contour.length > 5 && contour.length < 5000) {
+                            contours.push(contour);
+                        }
+                    }
+                }
+
+                return contours;
+            }
+
+            function calculateArea(contour) {
+                let area = 0;
+                const n = contour.length;
+                for (let i = 0; i < n; i++) {
+                    const j = (i + 1) % n;
+                    area += contour[i].x * contour[j].y;
+                    area -= contour[j].x * contour[i].y;
+                }
+                return Math.abs(area) / 2;
+            }
+
+            // ==================== 主循环 ====================
+            function loop() {
+                if (isProcessing && videoReady) {
+                    processFrame();
+                }
+                animationId = requestAnimationFrame(loop);
+            }
+
+            function startLoop() {
+                if (animationId) return;
+                isProcessing = true;
+                btnToggle.textContent = '⏸️ 暂停';
+                loop();
+            }
+
+            function stopProcessing() {
+                isProcessing = false;
+                btnToggle.textContent = '▶️ 开始';
+            }
+
+            // ==================== 按钮处理 ====================
+            function toggleProcessing() {
+                if (isProcessing) {
+                    stopProcessing();
+                    setStatus('⏸️ 已暂停', '');
+                } else {
+                    if (!videoReady) {
+                        setStatus('⚠️ 请先启动摄像头', 'error');
+                        return;
+                    }
+                    startLoop();
+                    setStatus('✅ 实时分析中...', 'success');
+                }
+            }
+
+            function cycleThreshold() {
+                thresholdIndex = (thresholdIndex + 1) % thresholdLevels.length;
+                btnThreshold.textContent = `🔆 阈值: ${thresholdLevels[thresholdIndex].label}`;
+            }
+
+            function cycleMinArea() {
+                minAreaIndex = (minAreaIndex + 1) % minAreaLevels.length;
+                btnMinArea.textContent = `📐 面积: ${minAreaLevels[minAreaIndex].label}`;
+            }
+
+            function cycleColor() {
+                colorIndex = (colorIndex + 1) % contourColors.length;
+                btnColor.textContent = `🎨 ${contourColors[colorIndex].label}`;
+            }
+
+            // ==================== 事件绑定 ====================
+            btnStartCamera.addEventListener('click', () => {
+                startCamera().then(() => {
+                    if (videoReady) {
+                        startLoop();
+                    }
+                });
+            });
+
+            btnToggle.addEventListener('click', toggleProcessing);
+            btnThreshold.addEventListener('click', cycleThreshold);
+            btnMinArea.addEventListener('click', cycleMinArea);
+            btnColor.addEventListener('click', cycleColor);
+
+            // ==================== 页面生命周期 ====================
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    stopProcessing();
+                } else if (videoReady && !isProcessing) {
+                    startLoop();
+                }
+            });
+
+            window.addEventListener('beforeunload', () => {
+                stopProcessing();
+                if (animationId) {
+                    cancelAnimationFrame(animationId);
+                    animationId = null;
+                }
+                stopCamera();
+            });
+
+            // ==================== 初始状态 ====================
+            setStatus('👆 点击下方按钮启动摄像头', '');
+            permissionOverlay.classList.remove('hidden');
+            stopProcessing();
+
+            console.log('📷 轮廓提取应用已就绪');
+            console.log('   - 需要用户点击允许摄像头');
+            console.log('   - 支持前后摄像头自动切换');
+            console.log('   - 帧跳过: 每2帧处理1帧以优化性能');
+
+            // 可选：自动检测是否已有权限并直接启动
+            // 如果之前授权过，navigator.permissions.query 可以检测
+            if (navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query({ name: 'camera' }).then(result => {
+                    if (result.state === 'granted') {
+                        console.log('检测到已有摄像头权限，自动启动');
+                        startCamera().then(() => {
+                            if (videoReady) startLoop();
+                        });
+                    }
+                }).catch(() => {
+                    // 某些浏览器不支持 permissions.query for camera
+                });
+            }
+        })();
+    </script>
+</body>
+</html>
